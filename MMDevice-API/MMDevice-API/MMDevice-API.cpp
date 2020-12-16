@@ -1,127 +1,287 @@
-﻿#include <iostream>
-#include <MMDeviceAPI.h>
-#include <AudioClient.h>
+﻿#define _CRT_SECURE_NO_WARNINGS
 
+#pragma comment(lib,"avrt.lib")
+#include<Audioclient.h>
+#include <mmdeviceapi.h>
+#include<iostream>
+#include<avrt.h>
 
-
-#define REFTIMES_PER_SEC  10000000
-
-HRESULT CreateAudioClient(IMMDevice* pDevice, IAudioClient** ppAudioClient)
+class CSoundCardAudioCapture
 {
-  if (!pDevice)
+
+public:
+
+  CSoundCardAudioCapture()
   {
-    return E_INVALIDARG;
+    m_pAudioCaptureClient = NULL;
+    m_pAudioClient = NULL;
+    m_pMMDevice = NULL;
+    m_hEventStop = NULL;
+    m_hTimerWakeUp = NULL;
+    m_hTask = NULL;
+    m_pwfx = NULL;
   }
 
-  if (!ppAudioClient)
+  int StartCapture()
   {
-    return E_POINTER;
-  }
+    CoInitialize(NULL);
+    IMMDeviceEnumerator *pMMDeviceEnumerator = NULL;
+    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL,
+      __uuidof(IMMDeviceEnumerator), (void**)&pMMDeviceEnumerator);
+    if (FAILED(hr))
+    {
+      CoUninitialize();
+      return -1;
+    }
+    hr = pMMDeviceEnumerator->GetDefaultAudioEndpoint(eRender, eConsole, &m_pMMDevice);
+    if (FAILED(hr))
+    {
+      CoUninitialize();
+      return -1;
+    }
+    pMMDeviceEnumerator->Release();
 
-  HRESULT hr = S_OK;
-
-  WAVEFORMATEX *pwfx = NULL;
-
-  REFERENCE_TIME hnsRequestedDuration = REFTIMES_PER_SEC;
-
-  UINT32 nFrames = 0;
-
-  IAudioClient *pAudioClient = NULL;
-
-  // Get the audio client.
-  hr = pDevice->Activate(
-    __uuidof(IAudioClient),
-    CLSCTX_ALL,
-    NULL,
-    (void**)&pAudioClient);
-  if (hr == NULL) {
-    std::cout << "pDevice->Activate fail";
-  }
-
-  // Get the device format.
-  hr = pAudioClient->GetMixFormat(&pwfx);
-  if (hr == NULL) {
-    std::cout << "pAudioClient->GetMixFormat fail";
-  }
-
-
-  // Open the stream and associate it with an audio session.
-  hr = pAudioClient->Initialize(
-    AUDCLNT_SHAREMODE_EXCLUSIVE,
-    AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-    hnsRequestedDuration,
-    hnsRequestedDuration,
-    pwfx,
-    NULL);
-
-  // If the requested buffer size is not aligned...
-  if (hr == AUDCLNT_E_BUFFER_SIZE_NOT_ALIGNED)
-  {
-    // Get the next aligned frame.
-    hr = pAudioClient->GetBufferSize(&nFrames);
-    if (hr == NULL) {
-      std::cout << "pAudioClient->GetMixFormat fail";
+    m_hEventStop = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (m_hEventStop == NULL)
+    {
+      CoUninitialize();
+      return -1;
     }
 
-    hnsRequestedDuration = (REFERENCE_TIME)
-      ((10000.0 * 1000 / pwfx->nSamplesPerSec * nFrames) + 0.5);
-
-    // Release the previous allocations.
-    //SAFE_RELEASE(pAudioClient);
-    CoTaskMemFree(pwfx);
-
-    // Create a new audio client.
-    hr = pDevice->Activate(
-      __uuidof(IAudioClient),
-      CLSCTX_ALL,
-      NULL,
-      (void**)&pAudioClient);
-    if (hr == NULL) {
-      std::cout << "pDevice->Activate fail";
+    hr = m_pMMDevice->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, (void**)&m_pAudioClient);
+    if (FAILED(hr)) {
+      std::cout << "m_pMMDevice->Activate fail" << std::endl;
+      return -1;
     }
 
-    // Get the device format.
-    hr = pAudioClient->GetMixFormat(&pwfx);
-    if (hr == NULL) {
-      std::cout << "pAudioClient->GetMixFormat fail";
+    REFERENCE_TIME hnsDefaultDevicePeriod(0);
+    hr = m_pAudioClient->GetDevicePeriod(&hnsDefaultDevicePeriod, NULL);
+    if (FAILED(hr)) {
+      std::cout << "m_pMMDevice->Activate fail" << std::endl;
+      return -1;
     }
 
-    // Open the stream and associate it with an audio session.
-    hr = pAudioClient->Initialize(
-      AUDCLNT_SHAREMODE_SHARED,
-      AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-      hnsRequestedDuration,
-      hnsRequestedDuration,
-      pwfx,
-      NULL);
-    if (hr == NULL) {
-      std::cout << "pAudioClient->GetMixFormat fail";
+    hr = m_pAudioClient->GetMixFormat(&m_pwfx);
+    if (FAILED(hr)) {
+      std::cout << "m_pMMDevice->Activate fail" << std::endl;
+      return -1;
     }
+
+    if (!AdjustFormatTo16Bits(m_pwfx)) {
+      std::cout << "m_pMMDevice->Activate fail" << std::endl;
+      return -1;
+    }
+
+    m_hTimerWakeUp = CreateWaitableTimer(NULL, FALSE, NULL);
+    if (m_hTimerWakeUp == NULL) {
+      std::cout << "m_pMMDevice->Activate fail" << std::endl;
+      return -1;
+    }
+
+    hr = m_pAudioClient->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK, 0, 0, m_pwfx, 0);
+    if (FAILED(hr)) {
+      std::cout << "m_pMMDevice->Activate fail" << std::endl;
+      return -1;
+    }
+
+    while (true)
+    {
+      std::cout << "run";
+      Sleep(1000);
+    }
+
+    hr = m_pAudioClient->GetService(__uuidof(IAudioCaptureClient), (void**)&m_pAudioCaptureClient);
+    if (FAILED(hr)) {
+      std::cout << "m_pMMDevice->GetService fail" << std::endl;
+      return -1;
+    }
+
+    DWORD nTaskIndex = 0;
+    m_hTask = AvSetMmThreadCharacteristics(L"Capture", &nTaskIndex);
+    if (NULL == m_hTask) {
+      std::cout << "AvSetMmThreadCharacteristics fail" << std::endl;
+      return -1;
+    }
+
+    LARGE_INTEGER liFirstFire;
+    liFirstFire.QuadPart = -hnsDefaultDevicePeriod / 2; // negative means relative time
+    LONG lTimeBetweenFires = (LONG)hnsDefaultDevicePeriod / 2 / (10 * 1000); // convert to milliseconds
+
+    BOOL bOK = SetWaitableTimer(m_hTimerWakeUp, &liFirstFire, lTimeBetweenFires, NULL, NULL, FALSE);
+    if (!bOK) {
+      std::cout << "SetWaitableTimer fail" << std::endl;
+      return -1;
+    }
+
+    hr = m_pAudioClient->Start();
+    if (FAILED(hr)) {
+      std::cout << "m_pAudioClient->Start fail" << std::endl;
+      return -1;
+    }
+
+    m_hThread = CreateThread(NULL, 0, PTHREAD_START_ROUTINE_CALLBACK, this, 0, 0);
+    if (m_hThread == NULL) {
+      std::cout << "CreateThread fail" << std::endl;
+      return -1;
+    }
+
+    CoUninitialize();
+    return 0;
   }
-  else
+
+  int StopCapture()
   {
-    
+    if (m_pAudioClient)
+      m_pAudioClient->Stop();
+    SetEvent(m_hEventStop);
+    WaitForSingleObject(m_hThread, -1);
+    Close();
+    return 0;
   }
 
-  // Return to the caller.
-  *(ppAudioClient) = pAudioClient;
-  (*ppAudioClient)->AddRef();
+  void DoWork()
+  {
+    HANDLE waitArray[2] = { m_hEventStop, m_hTimerWakeUp };
+    DWORD dwWaitResult;
+    UINT32 nNextPacketSize(0);
+    BYTE *pData = NULL;
+    UINT32 nNumFramesToRead;
+    DWORD dwFlags;
+    CoInitialize(NULL);
+    FILE *file = fopen("D:\\pwm.data", "wb+");
+    while (TRUE)
+    {
+      dwWaitResult = WaitForMultipleObjects(sizeof(waitArray) / sizeof(waitArray[0]), waitArray, FALSE, INFINITE);
+      if (WAIT_OBJECT_0 == dwWaitResult) break;
 
-done:
+      if (WAIT_OBJECT_0 + 1 != dwWaitResult)
+      {
+        break;
+      }
 
-  // Clean up.
-  CoTaskMemFree(pwfx);
-  //SAFE_RELEASE(pAudioClient);
-  return hr;
+      HRESULT hr = m_pAudioCaptureClient->GetNextPacketSize(&nNextPacketSize);
+      if (FAILED(hr))
+      {
+        break;
+      }
+
+      if (nNextPacketSize == 0) continue;
+
+      hr = m_pAudioCaptureClient->GetBuffer(&pData, &nNumFramesToRead, &dwFlags, NULL, NULL);
+      if (FAILED(hr))
+      {
+        break;
+      }
+
+      if (0 != nNumFramesToRead)
+      {
+        std::cout << "capture data " << nNumFramesToRead * m_pwfx->nBlockAlign << std::endl;
+        fwrite(pData, 1, nNumFramesToRead * m_pwfx->nBlockAlign, file);
+      }
+      m_pAudioCaptureClient->ReleaseBuffer(nNumFramesToRead);
+    }
+    CoUninitialize();
+  }
+
+  static DWORD WINAPI PTHREAD_START_ROUTINE_CALLBACK(LPVOID lpThreadParameter);
+
+protected:
+
+  void Close()
+  {
+    if (m_hEventStop != NULL)
+    {
+      CloseHandle(m_hEventStop);
+      m_hEventStop = NULL;
+    }
+    if (m_pAudioClient)
+    {
+      m_pAudioClient->Release();
+      m_pAudioClient = NULL;
+    }
+    if (m_pwfx != NULL)
+    {
+      CoTaskMemFree(m_pwfx);
+      m_pwfx = NULL;
+    }
+    if (m_hTimerWakeUp != NULL)
+    {
+      CancelWaitableTimer(m_hTimerWakeUp);
+      CloseHandle(m_hTimerWakeUp);
+      m_hTimerWakeUp = NULL;
+    }
+    if (m_hTask != NULL)
+    {
+      AvRevertMmThreadCharacteristics(m_hTask);
+      m_hTask = NULL;
+    }
+    if (m_pAudioCaptureClient != NULL)
+    {
+      m_pAudioCaptureClient->Release();
+      m_pAudioCaptureClient = NULL;
+    }
+  }
+
+  BOOL AdjustFormatTo16Bits(WAVEFORMATEX *pwfx)
+  {
+    BOOL bRet(FALSE);
+
+    if (pwfx->wFormatTag == WAVE_FORMAT_IEEE_FLOAT)
+    {
+      pwfx->wFormatTag = WAVE_FORMAT_PCM;
+      pwfx->wBitsPerSample = 16;
+      pwfx->nBlockAlign = pwfx->nChannels * pwfx->wBitsPerSample / 8;
+      pwfx->nAvgBytesPerSec = pwfx->nBlockAlign * pwfx->nSamplesPerSec;
+      bRet = TRUE;
+    }
+    else if (pwfx->wFormatTag == WAVE_FORMAT_EXTENSIBLE)
+    {
+      PWAVEFORMATEXTENSIBLE pEx = reinterpret_cast<PWAVEFORMATEXTENSIBLE>(pwfx);
+      if (IsEqualGUID(KSDATAFORMAT_SUBTYPE_IEEE_FLOAT, pEx->SubFormat))
+      {
+        pEx->SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+        pEx->Samples.wValidBitsPerSample = 16;
+        pwfx->wBitsPerSample = 16;
+        pwfx->nBlockAlign = pwfx->nChannels * pwfx->wBitsPerSample / 8;
+        pwfx->nAvgBytesPerSec = pwfx->nBlockAlign * pwfx->nSamplesPerSec;
+
+        bRet = TRUE;
+      }
+    }
+
+    return bRet;
+  }
+
+
+private:
+
+  HANDLE m_hThread;
+  HANDLE m_hTask;
+  HANDLE m_hTimerWakeUp;
+  IAudioCaptureClient * m_pAudioCaptureClient;
+  IAudioClient * m_pAudioClient;
+  WAVEFORMATEX * m_pwfx;
+  HANDLE m_hEventStop;
+  IMMDevice* m_pMMDevice;
+
+};
+
+DWORD CSoundCardAudioCapture::PTHREAD_START_ROUTINE_CALLBACK(LPVOID lpThreadParameter)
+{
+  CSoundCardAudioCapture* pCapture = (CSoundCardAudioCapture*)lpThreadParameter;
+  pCapture->DoWork();
+  return 0;
 }
 
 
-int main()
+int main(void)
 {
-  IMMDevice           *pDevice = NULL;
-  IAudioClient        *pAudioClient = NULL;
-  CreateAudioClient(pDevice, &pAudioClient);
-
-
+  CSoundCardAudioCapture cap;
+  while (true)
+  {
+    cap.StartCapture();
+    getchar();
+    cap.StopCapture();
+  }
   return 0;
 }
